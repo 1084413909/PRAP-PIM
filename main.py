@@ -5,33 +5,23 @@ import pickle as pkl
 import torch.optim as optim
 import torch.backends.cudnn as cudnn
 from torchvision import transforms, datasets
-from model import AlexNet, Vgg16, Res18, Res50, WRN
+from model import Vgg16, Res18, Res50, WRN
 from train_model import train, test
-from cut import pattern_translate, get_shape_mask, pattern_value_original_translate, pattern_value_normalized_translate, pattern_shape_and_value_normalized_translate
+from cut import pattern_translate, get_structure_mask, get_ORC_mask, get_shape_mask, pattern_value_identical_translate, pattern_value_similar_translate, structure_and_value_identical_translate, pattern_shape_and_value_similar_translate
 
 
-# 模型参数
-model_name = 'Vgg16'
+model_name = 'Vgg16'  # select one from[Vgg16, Res18, Res50, WRN]
+translate_name = 'weight_pattern_shape_translate'  # select one from['structure_pruning', 'ORC_pruning', 'weight_pattern_shape_translate', 'weight_pattern_value_identical_translate', 'weight_pattern_value_similar_translate', 'structure_pruning_and_weight_pattern_value_identical_translate', 'weight_pattern_shape_and_value_similar_translate']
 
-# 超参数
 lr = 0.1
-weight_decay_1 = 0.001
-weight_decay_2 = 0.001
 epoches = 200
 batch_size = 128
+weight_decay_1 = 0.001
+weight_decay_2 = 0.001
 
-# 剪枝参数
 OU_size = 8
 pattern_shape_number = 8
 translate_epoch = [150, 155, 160, 165, 170, 175, 180, 185, 190, 195, 200]
-# translate_name = 'weight_pattern_shape_translate'
-# translate_name = 'weight_pattern_value_original_translate'
-# translate_name = 'weight_pattern_value_normalized_translate'
-translate_name = 'weight_pattern_shape_and_value_normalized_translate'
-
-
-# 打印数组时不再显示省略号改为全部显示
-torch.set_printoptions(profile="full")
 
 
 def get_dataloader(data_name):
@@ -63,172 +53,6 @@ if __name__ == '__main__':
         cudnn.deterministic = True
         cudnn.benchmark = True  # 不改变给定的神经网络结构的情况下，大大提升其训练和预测的速度
     train_loader, test_loader, train_size, test_size, num_classes, input_size = get_dataloader('cifar10')  # 构建训练集、测试集
-
-
-    # 创建并训练模型
-    if model_name == 'AlexNet':
-        model_original = AlexNet(num_classes)
-        model_original = model_original.to(device)
-        kernel_size = [3, 3, 3, 3, 3,
-                       1, 1, 1]
-        layer_in_channel = [3, 96, 256, 384, 384,
-                            4096, 4096, 4096]
-        layer_out_channel = [96, 256, 384, 384, 256,
-                             4096, 4096, num_classes]
-        weight_name = ['conv1.weight', 'conv2.weight', 'conv3.weight', 'conv4.weight', 'conv5.weight',
-                       'fc1.weight', 'fc2.weight', 'fc3.weight']
-        optimizer = optim.SGD(model_original.parameters(), lr=lr, momentum=0.9, weight_decay=0)  # 创建优化器
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epoches)  # 动态学习率
-
-        if not os.path.exists('model_' + model_name + '_original_parameters.pth'):
-            train(model_original, model_name, weight_decay_1, device, optimizer, scheduler, train_loader, test_loader, epoches, translate_epoch[0])  # 训练模型
-        model_original.load_state_dict(torch.load('model_' + model_name + '_original_parameters.pth'))  # 加载训练好的原始模型
-        original_accuracy, _ = test(model_original, device, test_loader)  # 获得原始模型的准确率
-        print(original_accuracy)
-
-        pattern_value_number = [OU_size, OU_size, OU_size, OU_size, OU_size,
-                                1, 1, 1]
-        channel_number = [1, 1, 1, 1, 1,
-                          OU_size, OU_size, OU_size]
-        best_keep_ratio = [1.0, 1.0, 1.0, 1.0, 1.0,
-                           1.0, 1.0, 1.0]
-
-        if 'shape' in translate_name:
-            pattern_value_number = [8, 4, 4, 4, 4,
-                                    1, 1, 1]
-            channel_number = [1, 2, 2, 2, 2,
-                              4 * OU_size, 4 * OU_size, OU_size]
-
-        if 'value_original' in translate_name:
-            threshold = [0.0, 0.65, 0.65, 0.65, 0.65,
-                         0.5, 0.5, 0.0]
-
-        if 'value_normalized' in translate_name:
-            best_keep_ratio = [1.0, 0.375, 0.25, 0.25, 0.375,
-                               0.03125, 0.03125, 1.0]
-
-        # 创建剪枝矩阵
-        value_list = [torch.ones((layer_out_channel[i], layer_in_channel[i], kernel_size[i], kernel_size[i])) for i in range(0, len(weight_name))]
-        mask = dict(zip(weight_name, value_list))
-        for i in range(0, len(weight_name)):
-            if 'fc' in weight_name[i]:
-                mask[weight_name[i]] = torch.ones(layer_out_channel[i], layer_in_channel[i])
-
-        # 创建weight-pattern重用映射矩阵
-        layer_map_list = [torch.ones((layer_in_channel[i], layer_out_channel[i], 2)) for i in range(0, len(weight_name))]
-        map_information = dict(zip(weight_name, layer_map_list))
-
-        # 创建weight-pattern倍数关系矩阵
-        layer_multiple_list = [torch.ones((layer_out_channel[i], layer_in_channel[i], kernel_size[i], kernel_size[i])) for i in range(0, len(weight_name))]
-        multiple_relationship_information = dict(zip(weight_name, layer_multiple_list))
-
-        # 记录每一层weight-pattern的重用率
-        layer_reuse_ratio_list = [torch.zeros(1) for i in range(0, len(weight_name))]
-        reuse_ratio_information = dict(zip(weight_name, layer_reuse_ratio_list))
-
-        if not os.path.exists('model_' + model_name + '_pattern_mask' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                mask[weight_name[i]] = get_shape_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], channel_number[i], pattern_value_number[i], pattern_shape_number, OU_size)  # 计算剪枝矩阵
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'wb') as f:
-                pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        else:
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
-                mask = pkl.load(f)
-                f.close()
-
-        if not os.path.exists('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_shape_and_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i], mask[weight_name[i]])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_shape_and_value_normalized_translate':
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
-
-        if not os.path.exists('model_' + model_name + '_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_normalized_translate':
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
-
-        if not os.path.exists('model_' + model_name + '_original_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_original_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_original_translate':
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
-
-        pattern_translate(model_original, model_name, translate_name, weight_name, layer_in_channel, layer_out_channel, kernel_size, best_keep_ratio, mask, map_information, multiple_relationship_information, weight_decay_1, weight_decay_2, device, optimizer, scheduler, train_loader, test_loader, epoches, translate_epoch)
-    # 准确率：original 92.48%  shape 92.28%  value_normalized 92.06%  all 91.08%
 
 
     # 创建并训练模型
@@ -274,12 +98,22 @@ if __name__ == '__main__':
                               2, 4, 4, 4, 4, 4,
                               4 * OU_size, 4 * OU_size, OU_size]
 
-        if 'value_original' in translate_name:
+        if 'structure' in translate_name:
+            best_keep_ratio = [1.0, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65,
+                               0.65, 0.65, 0.65, 0.65, 0.65, 0.65,
+                               0.25, 0.25, 1.0]
+
+        if 'ORC' in translate_name:
+            best_keep_ratio = [1.0, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.05, 0.05, 1.0]
+
+        if 'value_identical' in translate_name:
             best_keep_ratio = [1.0, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75,
                                0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
                                0.75, 0.75, 1.0]
 
-        if 'value_normalized' in translate_name:
+        if 'value_similar' in translate_name:
             best_keep_ratio = [1.0, 0.75, 0.5, 0.5, 0.25, 0.25, 0.25,
                                0.125, 0.125, 0.125, 0.125, 0.125, 0.125,
                                0.03125, 0.03125, 1.0]
@@ -303,109 +137,179 @@ if __name__ == '__main__':
         layer_reuse_ratio_list = [torch.zeros(1) for i in range(0, len(weight_name))]
         reuse_ratio_information = dict(zip(weight_name, layer_reuse_ratio_list))
 
-        if not os.path.exists('model_' + model_name + '_pattern_mask' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                mask[weight_name[i]] = get_shape_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], channel_number[i], pattern_value_number[i], pattern_shape_number, OU_size)  # 计算剪枝矩阵
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'wb') as f:
-                pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        else:
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
-                mask = pkl.load(f)
-                f.close()
+        if 'structure_pruning' in translate_name:
+            if not os.path.exists('model_' + model_name + '_structure_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    if best_keep_ratio[i] != 1.0:
+                        print(weight_name[i])
+                        mask[weight_name[i]] = get_structure_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], best_keep_ratio[i])  # 计算剪枝矩阵
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_shape_and_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i], mask[weight_name[i]])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_shape_and_value_normalized_translate':
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'ORC_pruning' in translate_name:
+            if not os.path.exists('model_' + model_name + '_ORC_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    if best_keep_ratio[i] != 1.0:
+                        print(weight_name[i])
+                        mask[weight_name[i]] = get_ORC_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], best_keep_ratio[i])  # 计算剪枝矩阵
+                with open('model_' + model_name + '_ORC_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_ORC_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_normalized_translate':
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'weight_pattern_shape' in translate_name:
+            if not os.path.exists('model_' + model_name + '_pattern_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    mask[weight_name[i]] = get_shape_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], channel_number[i], pattern_value_number[i], pattern_shape_number, OU_size)  # 计算剪枝矩阵
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_original_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_original_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_original_translate':
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'value_identical' in translate_name:
+            if not os.path.exists('model_' + model_name + '_identical_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_identical_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_identical_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_identical_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_identical_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_identical_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if 'value_similar' in translate_name:
+            if not os.path.exists('model_' + model_name + '_value_similar_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_similar_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_value_similar_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'wb') as f:
+                    pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_value_similar_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'rb') as f:
+                    multiple_relationship_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if translate_name == 'structure_pruning_and_weight_pattern_value_identical_translate':
+            if not os.path.exists('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = structure_and_value_identical_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], mask[weight_name[i]])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if translate_name == 'weight_pattern_shape_and_value_similar_translate':
+            if not os.path.exists('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_shape_and_value_similar_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i], mask[weight_name[i]])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'wb') as f:
+                    pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'rb') as f:
+                    multiple_relationship_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
 
         pattern_translate(model_original, model_name, translate_name, weight_name, layer_in_channel, layer_out_channel, kernel_size, best_keep_ratio, mask, map_information, multiple_relationship_information, weight_decay_1, weight_decay_2, device, optimizer, scheduler, train_loader, test_loader, epoches, translate_epoch)
-        # 准确率：original 93.75%  shape 93.55%  value_normalized 93.28%  all 92.59%
 
 
     # 创建并训练模型
@@ -470,14 +374,28 @@ if __name__ == '__main__':
                               OU_size, OU_size, OU_size,
                               OU_size]
 
-        if 'value_original' in translate_name:
+        if 'structure' in translate_name:
+            best_keep_ratio = [1.0, 0.65, 0.65, 0.65, 0.65, 0.65,
+                               0.65, 0.65, 0.65, 0.65, 0.65, 0.65,
+                               0.65, 0.65, 0.65, 0.65, 0.65,
+                               0.65, 0.65, 0.65,
+                               1.0]
+
+        if 'ORC' in translate_name:
+            best_keep_ratio = [1.0, 0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2,
+                               1.0]
+
+        if 'value_identical' in translate_name:
             best_keep_ratio = [1.0, 0.6, 0.6, 0.6, 0.6, 0.6,
                                0.6, 0.6, 0.6, 0.6, 0.6, 0.6,
                                0.6, 0.6, 0.6, 0.6, 0.6,
                                0.6, 0.6, 0.6,
                                1.0]
 
-        if 'value_normalized' in translate_name:
+        if 'value_similar' in translate_name:
             best_keep_ratio = [1.0, 0.75, 0.75, 0.75, 0.75, 0.375,
                                0.375, 0.375, 0.375, 0.1875, 0.1875, 0.1875,
                                0.1875, 0.09375, 0.09375, 0.09375, 0.09375,
@@ -503,109 +421,179 @@ if __name__ == '__main__':
         layer_reuse_ratio_list = [torch.zeros(1) for i in range(0, len(weight_name))]
         reuse_ratio_information = dict(zip(weight_name, layer_reuse_ratio_list))
 
-        if not os.path.exists('model_' + model_name + '_pattern_mask' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                mask[weight_name[i]] = get_shape_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], channel_number[i], pattern_value_number[i], pattern_shape_number, OU_size)  # 计算剪枝矩阵
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'wb') as f:
-                pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        else:
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
-                mask = pkl.load(f)
-                f.close()
+        if 'structure_pruning' in translate_name:
+            if not os.path.exists('model_' + model_name + '_structure_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    if best_keep_ratio[i] != 1.0:
+                        print(weight_name[i])
+                        mask[weight_name[i]] = get_structure_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], best_keep_ratio[i])  # 计算剪枝矩阵
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_shape_and_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i], mask[weight_name[i]])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_shape_and_value_normalized_translate':
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'ORC_pruning' in translate_name:
+            if not os.path.exists('model_' + model_name + '_ORC_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    if best_keep_ratio[i] != 1.0:
+                        print(weight_name[i])
+                        mask[weight_name[i]] = get_ORC_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], best_keep_ratio[i])  # 计算剪枝矩阵
+                with open('model_' + model_name + '_ORC_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_ORC_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_normalized_translate':
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'weight_pattern_shape' in translate_name:
+            if not os.path.exists('model_' + model_name + '_pattern_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    mask[weight_name[i]] = get_shape_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], channel_number[i], pattern_value_number[i], pattern_shape_number, OU_size)  # 计算剪枝矩阵
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_original_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_original_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_original_translate':
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'value_identical' in translate_name:
+            if not os.path.exists('model_' + model_name + '_identical_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_identical_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_identical_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_identical_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_identical_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_identical_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if 'value_similar' in translate_name:
+            if not os.path.exists('model_' + model_name + '_value_similar_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_similar_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_value_similar_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'wb') as f:
+                    pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_value_similar_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'rb') as f:
+                    multiple_relationship_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if translate_name == 'structure_pruning_and_weight_pattern_value_identical_translate':
+            if not os.path.exists('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = structure_and_value_identical_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], mask[weight_name[i]])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if translate_name == 'weight_pattern_shape_and_value_similar_translate':
+            if not os.path.exists('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_shape_and_value_similar_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i], mask[weight_name[i]])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'wb') as f:
+                    pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'rb') as f:
+                    multiple_relationship_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
 
         pattern_translate(model_original, model_name, translate_name, weight_name, layer_in_channel, layer_out_channel, kernel_size, best_keep_ratio, mask, map_information, multiple_relationship_information, weight_decay_1, weight_decay_2, device, optimizer, scheduler, train_loader, test_loader, epoches, translate_epoch)
-        # 准确率：original 95.10%  shape 95.16%  value_normalized 94.63%  all 94.25%
 
 
     # 创建并训练模型
@@ -696,7 +684,27 @@ if __name__ == '__main__':
                               OU_size, OU_size, OU_size, OU_size,
                               OU_size]
 
-        if 'value_original' in translate_name:
+        if 'structure' in translate_name:
+            best_keep_ratio = [1.0, 0.75, 0.65, 0.75, 0.75, 0.65, 0.75, 0.75, 0.65, 0.75,
+                               0.75, 0.65, 0.75, 0.75, 0.65, 0.75, 0.75, 0.65, 0.75,
+                               0.75, 0.65, 0.75, 0.75, 0.65, 0.75, 0.75, 0.65, 0.75,
+                               0.75, 0.65, 0.75, 0.75, 0.65, 0.75, 0.75, 0.65, 0.75,
+                               0.75, 0.65, 0.75, 0.75, 0.65, 0.75, 0.75, 0.65, 0.75,
+                               0.75, 0.65, 0.75,
+                               0.75, 0.75, 0.75, 0.75,
+                               1.0]
+
+        if 'ORC' in translate_name:
+            best_keep_ratio = [1.0, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2,
+                               0.2, 0.2, 0.2, 0.2,
+                               1.0]
+
+        if 'value_identical' in translate_name:
             best_keep_ratio = [1.0, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6,
                                0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6,
                                0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6,
@@ -706,7 +714,7 @@ if __name__ == '__main__':
                                0.6, 0.6, 0.6, 0.6,
                                1.0]
 
-        if 'value_normalized' in translate_name:
+        if 'value_similar' in translate_name:
             best_keep_ratio = [1.0, 0.75, 0.75, 0.25, 0.75, 0.75, 0.25, 0.75, 0.75, 0.25,
                                0.5, 0.5, 0.125, 0.5, 0.5, 0.125, 0.5, 0.5, 0.125,
                                0.5, 0.5, 0.125, 0.25, 0.25, 0.0625, 0.25, 0.25, 0.0625,
@@ -735,109 +743,179 @@ if __name__ == '__main__':
         layer_reuse_ratio_list = [torch.zeros(1) for i in range(0, len(weight_name))]
         reuse_ratio_information = dict(zip(weight_name, layer_reuse_ratio_list))
 
-        if not os.path.exists('model_' + model_name + '_pattern_mask' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                mask[weight_name[i]] = get_shape_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], channel_number[i], pattern_value_number[i], pattern_shape_number, OU_size)  # 计算剪枝矩阵
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'wb') as f:
-                pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        else:
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
-                mask = pkl.load(f)
-                f.close()
+        if 'structure_pruning' in translate_name:
+            if not os.path.exists('model_' + model_name + '_structure_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    if best_keep_ratio[i] != 1.0:
+                        print(weight_name[i])
+                        mask[weight_name[i]] = get_structure_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], best_keep_ratio[i])  # 计算剪枝矩阵
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_shape_and_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i], mask[weight_name[i]])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_shape_and_value_normalized_translate':
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'ORC_pruning' in translate_name:
+            if not os.path.exists('model_' + model_name + '_ORC_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    if best_keep_ratio[i] != 1.0:
+                        print(weight_name[i])
+                        mask[weight_name[i]] = get_ORC_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], best_keep_ratio[i])  # 计算剪枝矩阵
+                with open('model_' + model_name + '_ORC_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_ORC_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_normalized_translate':
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'weight_pattern_shape' in translate_name:
+            if not os.path.exists('model_' + model_name + '_pattern_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    mask[weight_name[i]] = get_shape_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], channel_number[i], pattern_value_number[i], pattern_shape_number, OU_size)  # 计算剪枝矩阵
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_original_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_original_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_original_translate':
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'value_identical' in translate_name:
+            if not os.path.exists('model_' + model_name + '_identical_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_identical_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_identical_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_identical_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_identical_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_identical_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if 'value_similar' in translate_name:
+            if not os.path.exists('model_' + model_name + '_value_similar_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_similar_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_value_similar_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'wb') as f:
+                    pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_value_similar_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'rb') as f:
+                    multiple_relationship_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if translate_name == 'structure_pruning_and_weight_pattern_value_identical_translate':
+            if not os.path.exists('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = structure_and_value_identical_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], mask[weight_name[i]])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if translate_name == 'weight_pattern_shape_and_value_similar_translate':
+            if not os.path.exists('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_shape_and_value_similar_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i], mask[weight_name[i]])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'wb') as f:
+                    pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'rb') as f:
+                    multiple_relationship_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
 
         pattern_translate(model_original, model_name, translate_name, weight_name, layer_in_channel, layer_out_channel, kernel_size, best_keep_ratio, mask, map_information, multiple_relationship_information, weight_decay_1, weight_decay_2, device, optimizer, scheduler, train_loader, test_loader, epoches, translate_epoch)
-        # 准确率：original 95.12%  shape 94.95%  value_normalized 94.75%  all 94.56%
 
 
     # 创建并训练模型
@@ -892,13 +970,25 @@ if __name__ == '__main__':
                               OU_size, OU_size, OU_size,
                               OU_size]
 
-        if 'value_original' in translate_name:
+        if 'structure' in translate_name:
+            best_keep_ratio = [1.0, 1.0, 0.65, 0.65, 0.65, 0.65, 0.65,
+                               0.65, 0.65, 0.65, 0.65, 0.65, 0.65,
+                               0.65, 0.65, 0.65,
+                               1.0]
+
+        if 'ORC' in translate_name:
+            best_keep_ratio = [1.0, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15,
+                               0.15, 0.15, 0.15, 0.15, 0.15, 0.15,
+                               0.15, 0.15, 0.15,
+                               1.0]
+
+        if 'value_identical' in translate_name:
             best_keep_ratio = [1.0, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7,
                                0.7, 0.7, 0.7, 0.7, 0.7, 0.7,
                                0.7, 0.7, 0.7,
                                1.0]
 
-        if 'value_normalized' in translate_name:
+        if 'value_similar' in translate_name:
             best_keep_ratio = [1.0, 0.75, 0.75, 0.75, 0.75, 0.375, 0.375,
                                0.375, 0.375, 0.1875, 0.1875, 0.1875, 0.1875,
                                0.75, 0.375, 0.1875,
@@ -923,106 +1013,176 @@ if __name__ == '__main__':
         layer_reuse_ratio_list = [torch.zeros(1) for i in range(0, len(weight_name))]
         reuse_ratio_information = dict(zip(weight_name, layer_reuse_ratio_list))
 
-        if not os.path.exists('model_' + model_name + '_pattern_mask' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                mask[weight_name[i]] = get_shape_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], channel_number[i], pattern_value_number[i], pattern_shape_number, OU_size)  # 计算剪枝矩阵
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'wb') as f:
-                pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        else:
-            with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
-                mask = pkl.load(f)
-                f.close()
+        if 'structure_pruning' in translate_name:
+            if not os.path.exists('model_' + model_name + '_structure_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    if best_keep_ratio[i] != 1.0:
+                        print(weight_name[i])
+                        mask[weight_name[i]] = get_structure_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], best_keep_ratio[i])  # 计算剪枝矩阵
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_shape_and_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i], mask[weight_name[i]])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_shape_and_value_normalized_translate':
-            with open('model_' + model_name + '_shape_and_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'ORC_pruning' in translate_name:
+            if not os.path.exists('model_' + model_name + '_ORC_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    if best_keep_ratio[i] != 1.0:
+                        print(weight_name[i])
+                        mask[weight_name[i]] = get_ORC_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], best_keep_ratio[i])  # 计算剪枝矩阵
+                with open('model_' + model_name + '_ORC_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_ORC_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_value_normalized_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_normalized_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'wb') as f:
-                pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_normalized_translate':
-            with open('model_' + model_name + '_value_normalized_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'rb') as f:
-                multiple_relationship_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'weight_pattern_shape' in translate_name:
+            if not os.path.exists('model_' + model_name + '_pattern_mask' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    mask[weight_name[i]] = get_shape_mask(model_original, weight_name[i], layer_in_channel[i], layer_out_channel[i], kernel_size[i], channel_number[i], pattern_value_number[i], pattern_shape_number, OU_size)  # 计算剪枝矩阵
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'wb') as f:
+                    pkl.dump(mask, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
 
-        if not os.path.exists('model_' + model_name + '_original_map_information' + '.pkl'):
-            checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
-            model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
-            for i in range(0, len(weight_name)):
-                print(weight_name[i])
-                if best_keep_ratio[i] != 1.0:
-                    map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_original_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
-                    map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
-                    print(reuse_ratio_information[weight_name[i]])
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'wb') as f:
-                pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'wb') as f:
-                pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
-                f.close()
-        elif translate_name == 'weight_pattern_value_original_translate':
-            with open('model_' + model_name + '_original_map_information' + '.pkl', 'rb') as f:
-                map_information = pkl.load(f)
-                f.close()
-            with open('model_' + model_name + 'original_value_reuse_ratio_information' + '.pkl', 'rb') as f:
-                reuse_ratio_information = pkl.load(f)
-                f.close()
-            for i in range(0, len(weight_name)):
-                best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+        if 'value_identical' in translate_name:
+            if not os.path.exists('model_' + model_name + '_identical_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_identical_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_identical_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_identical_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_identical_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_identical_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if 'value_similar' in translate_name:
+            if not os.path.exists('model_' + model_name + '_value_similar_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_value_similar_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_value_similar_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'wb') as f:
+                    pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_value_similar_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_value_multiple_relationship_information' + '.pkl', 'rb') as f:
+                    multiple_relationship_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if translate_name == 'structure_pruning_and_weight_pattern_value_identical_translate':
+            if not os.path.exists('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = structure_and_value_identical_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], mask[weight_name[i]])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_structure_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_structure_and_value_identical_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
+
+        if translate_name == 'weight_pattern_shape_and_value_similar_translate':
+            if not os.path.exists('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl'):
+                checkpoint = torch.load('model_' + model_name + '_original_parameter_epoch' + str(translate_epoch[0]) + '_ckpt.pth')  # 加载断点
+                model_original.load_state_dict(checkpoint['model'])  # 加载断点模型参数
+                for i in range(0, len(weight_name)):
+                    print(weight_name[i])
+                    if best_keep_ratio[i] != 1.0:
+                        map_information[weight_name[i]], multiple_relationship_information[weight_name[i]], reuse_ratio_information[weight_name[i]] = pattern_shape_and_value_similar_translate(model_original, layer_in_channel[i], layer_out_channel[i], weight_name[i], best_keep_ratio[i], kernel_size[i], channel_number[i], mask[weight_name[i]])  # 计算剪枝矩阵
+                        map_information[weight_name[i]] = map_information[weight_name[i]].type(torch.long)
+                        print(reuse_ratio_information[weight_name[i]])
+                with open('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl', 'wb') as f:
+                    pkl.dump(map_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'wb') as f:
+                    pkl.dump(multiple_relationship_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'wb') as f:
+                    pkl.dump(reuse_ratio_information, f, pkl.HIGHEST_PROTOCOL)
+                    f.close()
+            else:
+                with open('model_' + model_name + '_pattern_mask' + '.pkl', 'rb') as f:
+                    mask = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_similar_map_information' + '.pkl', 'rb') as f:
+                    map_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_multiple_relationship_information' + '.pkl', 'rb') as f:
+                    multiple_relationship_information = pkl.load(f)
+                    f.close()
+                with open('model_' + model_name + '_shape_and_value_reuse_ratio_information' + '.pkl', 'rb') as f:
+                    reuse_ratio_information = pkl.load(f)
+                    f.close()
+                for i in range(0, len(weight_name)):
+                    best_keep_ratio[i] = 1.0 - reuse_ratio_information[weight_name[i]]
 
         pattern_translate(model_original, model_name, translate_name, weight_name, layer_in_channel, layer_out_channel, kernel_size, best_keep_ratio, mask, map_information, multiple_relationship_information, weight_decay_1, weight_decay_2, device, optimizer, scheduler, train_loader, test_loader, epoches, translate_epoch)
-        # 准确率：original 95.45%  shape 95.33%  value_normalized 95.36%  all 94.81%
