@@ -43,6 +43,84 @@ class Node:
         self.value = value
 
 
+def get_structure_mask(model, weight_name, in_channel, out_channel, kernel_size, keep_ratio):
+    keep_number = int(in_channel * keep_ratio)
+    if 'conv' in weight_name or 'shortcut' in weight_name:
+        pattern_mask = torch.zeros(out_channel, in_channel, kernel_size, kernel_size)
+        weight_matrix = torch.ones(out_channel, in_channel, kernel_size, kernel_size)
+        channel_importance = [Node(i, 0.0) for i in range(0, in_channel)]  # 统计通道的绝对值大小
+        for c_out in range(0, out_channel):
+            weight_matrix[c_out] = model.state_dict()[weight_name][c_out]
+        for c_in in range(0, in_channel):
+            for c_out in range(0, out_channel):
+                channel_importance[c_in].value = channel_importance[c_in].value + weight_matrix[c_out][c_in].abs().sum().item()
+        channel_importance.sort(key=lambda f: f.value, reverse=True)
+        for i in range(0, keep_number):
+            for c_out in range(0, out_channel):
+                pattern_mask[c_out][channel_importance[i].index] = torch.ones(kernel_size, kernel_size)  # 构造剪枝矩阵
+
+        return pattern_mask
+
+    if 'fc' in weight_name:
+        pattern_mask = torch.zeros(out_channel, in_channel)
+        weight_matrix = torch.ones(out_channel, in_channel)
+        channel_importance = [Node(i, 0.0) for i in range(0, in_channel)]  # 统计通道的绝对值大小
+        for c_out in range(0, out_channel):
+            weight_matrix[c_out] = model.state_dict()[weight_name][c_out]
+        for c_in in range(0, in_channel):
+            for c_out in range(0, out_channel):
+                channel_importance[c_in].value = channel_importance[c_in].value + weight_matrix[c_out][c_in].abs().item()
+        channel_importance.sort(key=lambda f: f.value, reverse=True)
+        for i in range(0, keep_number):
+            for c_out in range(0, out_channel):
+                pattern_mask[c_out][channel_importance[i].index] = 1.0  # 构造剪枝矩阵
+
+        return pattern_mask
+
+
+def get_ORC_mask(model, weight_name, in_channel, out_channel, kernel_size, keep_ratio):
+    if 'conv' in weight_name or 'shortcut' in weight_name:
+        const1 = kernel_size
+        const2 = kernel_size * kernel_size
+        keep_number = int(in_channel * kernel_size * kernel_size * keep_ratio)
+        pattern_mask = torch.zeros(out_channel, in_channel, kernel_size, kernel_size)
+        weight_matrix = torch.ones(out_channel, in_channel, kernel_size, kernel_size)
+        for c_out in range(0, out_channel):
+            weight_matrix[c_out] = model.state_dict()[weight_name][c_out]
+        for c_out in range(0, out_channel):
+            weight_importance = [Node(i, 0.0) for i in range(0, in_channel * kernel_size * kernel_size)]  # 统计通道的绝对值大小
+            for c_in in range(0, in_channel):
+                for h in range(0, kernel_size):
+                    for w in range(0, kernel_size):
+                        weight_importance[c_in * const2 + h * const1 + w].value = weight_matrix[c_out][c_in][h][w].abs().item()
+            weight_importance.sort(key=lambda f: f.value, reverse=True)
+            for i in range(0, keep_number):
+                c_in = int(weight_importance[i].index / const2)
+                weight_importance[i].index = weight_importance[i].index % const2
+                h = int(weight_importance[i].index / const1)
+                w = weight_importance[i].index % const1
+                pattern_mask[c_out][c_in][h][w] = 1.0  # 构造剪枝矩阵
+
+        return pattern_mask
+
+    if 'fc' in weight_name:
+        keep_number = int(in_channel * keep_ratio)
+        pattern_mask = torch.zeros(out_channel, in_channel)
+        weight_matrix = torch.ones(out_channel, in_channel)
+        weight_importance = [Node(i, 0.0) for i in range(0, in_channel)]  # 统计通道的绝对值大小
+        for c_out in range(0, out_channel):
+            weight_matrix[c_out] = model.state_dict()[weight_name][c_out]
+        for c_out in range(0, out_channel):
+            for c_in in range(0, in_channel):
+                weight_importance[c_in].value = weight_matrix[c_out][c_in].abs().item()
+            weight_importance.sort(key=lambda f: f.value, reverse=True)
+            for i in range(0, keep_number):
+                c_in = weight_importance[i].index
+                pattern_mask[c_out][c_in] = 1.0  # 构造剪枝矩阵
+
+        return pattern_mask
+
+
 # 模式形状转换
 def get_shape_mask(model, weight_name, in_channel, out_channel, kernel_size, channel_number, pattern_value_number, pattern_shape_number, OU_size):
     if 'conv' in weight_name and kernel_size != 1:
@@ -159,160 +237,8 @@ def get_shape_mask(model, weight_name, in_channel, out_channel, kernel_size, cha
 
             return pattern_mask
 
-"""
-def pattern_value_original_translate(model, in_channel, out_channel, weight_name, threshold, kernel_size, channel_number):
-    total_translate_weight_pattern = 0  # 统计重用weight-pattern的总数
 
-    # 构造矩阵加速代码执行速度
-    weight_matrix = torch.zeros(out_channel, in_channel, kernel_size, kernel_size)
-    if 'fc' in weight_name:
-        weight_matrix = torch.zeros(out_channel, in_channel)
-
-    # 先对权重进行量化
-    max_value = torch.max(model.state_dict()[weight_name]).item()
-    min_value = torch.min(model.state_dict()[weight_name]).item()
-    if max_value < -min_value:
-        max_value = -min_value
-    scale = (max_value - 0) / 127
-    for c_out in range(0, out_channel):
-        weight_matrix[c_out] = torch.round(model.state_dict()[weight_name][c_out] / scale)
-
-    if 'fc' in weight_name:
-        map_table = torch.zeros(in_channel, out_channel, 2)  # 映射表，最后一维第一个数存被转换weight-pattern的索引，第二个数存目标weight-pattern的索引
-        # 进行kernel级模式匹配
-        for c_in in range(0, in_channel, channel_number):
-            threshold_value = int(out_channel * threshold)  # 最终保留的模式数
-            translate_value = out_channel - threshold_value  # 最终转换的模式数
-            # 找到参数绝对值最小的模式
-            weight_importance = [Node(i, 0.0) for i in range(0, out_channel)]  # 统计模式的绝对值大小
-            for i in range(0, out_channel):
-                for j in range(0, channel_number):
-                    weight_importance[i].value = weight_importance[i].value + weight_matrix[i][c_in + j].abs().sum().item()
-            weight_importance.sort(key=lambda f: f.value, reverse=True)
-            # 统计保留模式的索引
-            keep_number = [0] * threshold_value  # 保留模式的索引
-            y_importance = torch.zeros(threshold_value + 1)  # 记录保留模式中的权重标准值
-            for i in range(0, threshold_value):
-                for j in range(0, channel_number):
-                    y_importance[i] = y_importance[i] + weight_matrix[weight_importance[i].index][c_in + j].abs().sum().item()
-                if y_importance[i] != 0:
-                    keep_number[i] = weight_importance[i].index
-                else:
-                    threshold_value = i
-                    translate_value = out_channel - threshold_value
-                    break
-            # 统计转换模式的索引
-            translate_number = [0] * translate_value  # 转换模式的索引
-            x_importance = torch.zeros(translate_value)  # 记录转换模式中的权重标准值
-            weightx_value = torch.zeros(translate_value, channel_number)  # 记录转换模式中的权重数值
-            weighty_value = torch.zeros(threshold_value + 1, channel_number)  # 记录保留模式中的权重数值
-            # 构造保留weight-pattern矩阵
-            for i in range(0, threshold_value):
-                for j in range(0, channel_number):
-                    weighty_value[i][j] = weight_matrix[keep_number[i]][c_in + j]
-            # 将绝对值最小的模式加入转换模式集合
-            for i in range(0, translate_value):
-                translate_number[i] = weight_importance[i + threshold_value].index
-                for j in range(0, channel_number):
-                    weightx_value[i][j] = weight_matrix[translate_number[i]][c_in + j]
-                x_importance[i] = weightx_value[i].abs().sum().item()
-            # 为每个要剪枝的模式匹配剩余最相似的模式
-            for i in range(0, translate_value):
-                if x_importance[i] != 0:
-                    select_number = (weighty_value - weightx_value[i]).abs().sum(axis=1).argmin().item()
-                    for j in range(0, channel_number):
-                        # 构建映射表
-                        map_table[c_in + j][i][0] = translate_number[i]
-                        if select_number != threshold_value:
-                            map_table[c_in + j][i][1] = keep_number[select_number]
-                        else:
-                            map_table[c_in + j][i][1] = -1
-                else:
-                    for j in range(0, channel_number):
-                        # 构建映射表
-                        map_table[c_in + j][i][0] = translate_number[i]
-                        map_table[c_in + j][i][1] = -1
-            # 统计重用weight-pattern的总数
-            total_translate_weight_pattern = total_translate_weight_pattern + translate_value
-            # 给map_table设置结束标志
-            if translate_value < out_channel:
-                for j in range(0, channel_number):
-                    map_table[c_in + j][translate_value][0] = -1
-
-        # 计算该层weight-pattern重用率
-        weight_pattern_reuse_ratio = total_translate_weight_pattern / (in_channel / channel_number * out_channel)
-        return map_table, weight_pattern_reuse_ratio
-
-    else:
-        map_table = torch.zeros(in_channel, out_channel, 2)  # 映射表，最后一维第一个数存被转换weight-pattern的索引，第二个数存目标weight-pattern的索引
-        # 进行kernel级模式匹配
-        for c_in in range(0, in_channel, channel_number):
-            threshold_value = int(out_channel * threshold)  # 最终保留的模式数
-            translate_value = out_channel - threshold_value  # 最终转换的模式数
-            # 找到参数绝对值最小的模式
-            weight_importance = [Node(i, 0.0) for i in range(0, out_channel)]  # 统计模式的绝对值大小
-            for i in range(0, out_channel):
-                for j in range(0, channel_number):
-                    weight_importance[i].value = weight_importance[i].value + weight_matrix[i][c_in + j].abs().sum().item()
-            weight_importance.sort(key=lambda f: f.value, reverse=True)
-            # 统计保留模式的索引
-            keep_number = [0] * threshold_value  # 保留模式的索引
-            y_importance = torch.zeros(threshold_value + 1)  # 记录保留模式中的权重标准值
-            for i in range(0, threshold_value):
-                for j in range(0, channel_number):
-                    y_importance[i] = y_importance[i] + weight_matrix[weight_importance[i].index][c_in + j].abs().sum().item()
-                if y_importance[i] != 0:
-                    keep_number[i] = weight_importance[i].index
-                else:
-                    threshold_value = i
-                    translate_value = out_channel - threshold_value
-                    break
-            # 统计转换模式的索引
-            translate_number = [0] * translate_value  # 转换模式的索引
-            x_importance = torch.zeros(translate_value)  # 记录转换模式中的权重标准值
-            weightx_value = torch.zeros(translate_value, channel_number, kernel_size, kernel_size)  # 记录转换模式中的权重数值
-            weighty_value = torch.zeros(threshold_value + 1, channel_number, kernel_size, kernel_size)  # 记录保留模式中的权重数值
-            # 构造保留weight-pattern矩阵
-            for i in range(0, threshold_value):
-                for j in range(0, channel_number):
-                    weighty_value[i][j] = weight_matrix[keep_number[i]][c_in + j]
-            # 将绝对值最小的模式加入转换模式集合
-            for i in range(0, translate_value):
-                translate_number[i] = weight_importance[i + threshold_value].index
-                for j in range(0, channel_number):
-                    weightx_value[i][j] = weight_matrix[translate_number[i]][c_in + j]
-                x_importance[i] = weightx_value[i].abs().sum().item()
-            # 为每个要剪枝的模式匹配剩余最相似的模式
-            for i in range(0, translate_value):
-                if x_importance[i] != 0:
-                    select_number = (weighty_value - weightx_value[i]).abs().sum(axis=3).sum(axis=2).sum(axis=1).argmin().item()
-                    for j in range(0, channel_number):
-                        # 构建映射表
-                        map_table[c_in + j][i][0] = translate_number[i]
-                        if select_number != threshold_value:
-                            map_table[c_in + j][i][1] = keep_number[select_number]
-                        else:
-                            map_table[c_in + j][i][1] = -1
-                else:
-                    for j in range(0, channel_number):
-                        # 构建映射表
-                        map_table[c_in + j][i][0] = translate_number[i]
-                        map_table[c_in + j][i][1] = -1
-
-            # 统计重用weight-pattern的总数
-            total_translate_weight_pattern = total_translate_weight_pattern + translate_value
-            # 给map_table设置结束标志
-            if translate_value < out_channel:
-                for j in range(0, channel_number):
-                    map_table[c_in + j][translate_value][0] = -1
-
-        # 计算该层weight-pattern重用率
-        weight_pattern_reuse_ratio = total_translate_weight_pattern / (in_channel / channel_number * out_channel)
-        return map_table, weight_pattern_reuse_ratio
-"""
-
-
-def pattern_value_original_translate(model, in_channel, out_channel, weight_name, threshold, kernel_size, channel_number):
+def pattern_value_identical_translate(model, in_channel, out_channel, weight_name, threshold, kernel_size, channel_number):
     total_translate_weight_pattern = 0  # 统计该层的weight-pattern重用率
 
     # 构造矩阵加速代码执行速度
@@ -437,7 +363,7 @@ def pattern_value_original_translate(model, in_channel, out_channel, weight_name
         return map_table, weight_pattern_reuse_ratio
 
 
-def pattern_value_normalized_translate(model, in_channel, out_channel, weight_name, threshold, kernel_size, channel_number):
+def pattern_value_similar_translate(model, in_channel, out_channel, weight_name, threshold, kernel_size, channel_number):
     total_translate_weight_pattern = 0  # 统计重用weight-pattern的总数
 
     # 构造矩阵加速代码执行速度
@@ -608,7 +534,193 @@ def pattern_value_normalized_translate(model, in_channel, out_channel, weight_na
         return map_table, multiple_relationship_table, weight_pattern_reuse_ratio
 
 
-def pattern_shape_and_value_normalized_translate(model, in_channel, out_channel, weight_name, threshold, kernel_size, channel_number, mask):
+def structure_and_value_identical_translate(model, in_channel, out_channel, weight_name, threshold, kernel_size, mask):
+    total_translate_weight_pattern = 0  # 统计该层的weight-pattern重用率
+
+    # 构造矩阵加速代码执行速度
+    weight_matrix = torch.zeros(out_channel, in_channel, kernel_size, kernel_size)
+    weight_matrix_pruning = torch.zeros(out_channel, in_channel, kernel_size, kernel_size)
+    if 'fc' in weight_name:
+        weight_matrix = torch.zeros(out_channel, in_channel)
+        weight_matrix_pruning = torch.zeros(out_channel, in_channel)
+
+    # 先对权重进行量化
+    max_value = torch.max(model.state_dict()[weight_name]).item()
+    min_value = torch.min(model.state_dict()[weight_name]).item()
+    if max_value < -min_value:
+        max_value = -min_value
+    scale = (max_value - 0) / 127
+    for c_out in range(0, out_channel):
+        weight_matrix[c_out] = torch.round(model.state_dict()[weight_name][c_out] / scale)
+        weight_matrix_pruning[c_out] = weight_matrix[c_out] * mask[c_out]
+
+    total_in_channel = in_channel
+
+    if 'fc' in weight_name:
+        map_table = torch.zeros(in_channel, out_channel, 2)  # 映射表，最后一维第一个数存被转换weight-pattern的索引，第二个数存目标weight-pattern的索引
+        for c_in in range(0, in_channel, 8):
+            # 模式大小排序
+            weight_importance = [Node(i, 0.0) for i in range(0, out_channel)]  # 统计模式的绝对值大小
+            for i in range(0, out_channel):
+                for j in range(0, 8):
+                    weight_importance[i].value = weight_importance[i].value + weight_matrix_pruning[i][c_in + j].abs().item()
+            weight_importance.sort(key=lambda f: f.value, reverse=True)
+            threshold_value = weight_importance[int(out_channel * threshold)].value
+            # 创建相关变量
+            translate_value = 0  # 记录每个in_channel转换多少weight-pattern
+            keep_number = [0] * out_channel  # 记录保留weight-pattern的索引
+            keep_value = 1  # 记录保留多少weight-pattern
+            keep_number[0] = weight_importance[0].index  # 将最大的weight-pattern加入保留集合
+            keep_weight_matrix = torch.zeros(out_channel, 8)  # 记录保留的weight-pattern
+            for j in range(0, 8):
+                keep_weight_matrix[0][j] = weight_matrix_pruning[keep_number[0]][c_in + j]
+            # 依次统计每个输入通道的映射表
+            for i in range(1, out_channel):
+                weightx_value = weight_matrix_pruning[weight_importance[i].index][c_in: c_in + 8]  # 记录转换模式中的权重数值
+                weighty_value = keep_weight_matrix[0:keep_value + 1]  # 记录保留模式中的权重数值
+                select_number = (weighty_value - weightx_value).abs().sum(axis=1).argmin().item()  # 找到最相近的weight-pattern
+                weight_pattern_difference = (weighty_value[select_number] - weightx_value).abs().sum().item()  # 计算两个weight-pattern之间的差异
+                # 判断每个weight-pattern是否可以重用
+                if weight_pattern_difference <= threshold_value:
+                    for j in range(0, 8):
+                        # 修改映射表
+                        if select_number != keep_value:
+                            map_table[c_in + j][translate_value][0] = weight_importance[i].index
+                            map_table[c_in + j][translate_value][1] = weight_importance[keep_number[select_number]].index
+                        else:
+                            map_table[c_in + j][translate_value][0] = weight_importance[i].index
+                            map_table[c_in + j][translate_value][1] = -1
+                    # 统计重用weight-pattern的个数
+                    translate_value = translate_value + 1
+                else:
+                    # 记录保留weight-pattern的索引
+                    keep_number[keep_value] = weight_importance[i].index
+                    # 将该weight-pattern加入保留weight-pattern矩阵
+                    for j in range(0, 8):
+                        keep_weight_matrix[keep_value][j] = weight_matrix_pruning[weight_importance[i].index][c_in + j]
+                    # 统计保留weight-pattern的个数
+                    keep_value = keep_value + 1
+            # 统计该层重用weight-pattern数量
+            total_translate_weight_pattern = total_translate_weight_pattern + translate_value
+            # 给map_table设置结束标志
+            for j in range(0, 8):
+                map_table[c_in + j][translate_value][0] = -1
+
+        # 计算该层weight-pattern重用率
+        weight_pattern_reuse_ratio = total_translate_weight_pattern / (in_channel / 8 * out_channel)
+        return map_table, weight_pattern_reuse_ratio
+
+    else:
+        if kernel_size != 1:
+            map_table = torch.zeros(in_channel, out_channel, 2)  # 映射表，最后一维第一个数存被转换weight-pattern的索引，第二个数存目标weight-pattern的索引
+            for c_in in range(0, in_channel):
+                # 模式大小排序
+                weight_importance = [Node(i, 0.0) for i in range(0, out_channel)]  # 统计模式的绝对值大小
+                for i in range(0, out_channel):
+                    weight_importance[i].value = weight_importance[i].value + weight_matrix_pruning[i][c_in].abs().sum().item()
+                weight_importance.sort(key=lambda f: f.value, reverse=True)
+                threshold_value = weight_importance[int(out_channel * threshold)].value
+                if weight_importance[0].value == 0:
+                    # 给map_table设置结束标志
+                    map_table[c_in][0][0] = -1
+                    total_in_channel = total_in_channel - 1
+                    continue
+                # 创建相关变量
+                translate_value = 0  # 记录每个in_channel转换多少weight-pattern
+                keep_number = [0] * out_channel  # 记录保留weight-pattern的索引
+                keep_value = 1  # 记录保留多少weight-pattern
+                keep_number[0] = weight_importance[0].index  # 将最大的weight-pattern加入保留集合
+                keep_weight_matrix = torch.zeros(out_channel, kernel_size, kernel_size)  # 记录保留的weight-pattern
+                keep_weight_matrix[0] = weight_matrix_pruning[keep_number[0]][c_in]
+                # 依次统计每个输入通道的映射表
+                for i in range(1, out_channel):
+                    weightx_value = weight_matrix_pruning[weight_importance[i].index][c_in]  # 记录转换模式中的权重数值
+                    weighty_value = keep_weight_matrix[0:keep_value + 1]  # 记录保留模式中的权重数值
+                    select_number = (weighty_value - weightx_value).abs().sum(axis=2).sum(axis=1).argmin().item()  # 找到最相近的weight-pattern
+                    weight_pattern_difference = (weighty_value[select_number] - weightx_value).abs().sum().item()  # 计算两个weight-pattern之间的差异
+                    # 判断每个weight-pattern是否可以重用
+                    if weight_pattern_difference <= threshold_value:
+                        # 修改映射表
+                        if select_number != keep_value:
+                            map_table[c_in][translate_value][0] = weight_importance[i].index
+                            map_table[c_in][translate_value][1] = weight_importance[keep_number[select_number]].index
+                        else:
+                            map_table[c_in][translate_value][0] = weight_importance[i].index
+                            map_table[c_in][translate_value][1] = -1
+                        # 统计重用weight-pattern的个数
+                        translate_value = translate_value + 1
+                    else:
+                        # 记录保留weight-pattern的索引
+                        keep_number[keep_value] = weight_importance[i].index
+                        # 将该weight-pattern加入保留weight-pattern矩阵
+                        keep_weight_matrix[keep_value] = weight_matrix_pruning[weight_importance[i].index][c_in]
+                        # 统计保留weight-pattern的个数
+                        keep_value = keep_value + 1
+                # 统计该层重用weight-pattern数量
+                total_translate_weight_pattern = total_translate_weight_pattern + translate_value
+                # 给map_table设置结束标志
+                map_table[c_in][translate_value][0] = -1
+
+            # 计算该层weight-pattern重用率
+            weight_pattern_reuse_ratio = total_translate_weight_pattern / (total_in_channel * out_channel)
+            return map_table, weight_pattern_reuse_ratio
+
+        else:
+            map_table = torch.zeros(in_channel, out_channel, 2)  # 映射表，最后一维第一个数存被转换weight-pattern的索引，第二个数存目标weight-pattern的索引
+            for c_in in range(0, in_channel, 8):
+                # 模式大小排序
+                weight_importance = [Node(i, 0.0) for i in range(0, out_channel)]  # 统计模式的绝对值大小
+                for i in range(0, out_channel):
+                    for j in range(0, 8):
+                        weight_importance[i].value = weight_importance[i].value + weight_matrix_pruning[i][c_in + j].abs().sum().item()
+                weight_importance.sort(key=lambda f: f.value, reverse=True)
+                threshold_value = weight_importance[int(out_channel * threshold)].value
+                # 创建相关变量
+                translate_value = 0  # 记录每个in_channel转换多少weight-pattern
+                keep_number = [0] * out_channel  # 记录保留weight-pattern的索引
+                keep_value = 1  # 记录保留多少weight-pattern
+                keep_number[0] = weight_importance[0].index  # 将最大的weight-pattern加入保留集合
+                keep_weight_matrix = torch.zeros(out_channel, 8, kernel_size, kernel_size)  # 记录保留的weight-pattern
+                for j in range(0, 8):
+                    keep_weight_matrix[0][j] = weight_matrix_pruning[keep_number[0]][c_in + j]
+                # 依次统计每个输入通道的映射表
+                for i in range(1, out_channel):
+                    weightx_value = weight_matrix_pruning[weight_importance[i].index][c_in: c_in + 8]  # 记录转换模式中的权重数值
+                    weighty_value = keep_weight_matrix[0:keep_value + 1]  # 记录保留模式中的权重数值
+                    select_number = (weighty_value - weightx_value).abs().sum(axis=1).argmin().item()  # 找到最相近的weight-pattern
+                    weight_pattern_difference = (weighty_value[select_number] - weightx_value).abs().sum().item()  # 计算两个weight-pattern之间的差异
+                    # 判断每个weight-pattern是否可以重用
+                    if weight_pattern_difference <= threshold_value:
+                        for j in range(0, 8):
+                            # 修改映射表
+                            if select_number != keep_value:
+                                map_table[c_in + j][translate_value][0] = weight_importance[i].index
+                                map_table[c_in + j][translate_value][1] = weight_importance[keep_number[select_number]].index
+                            else:
+                                map_table[c_in + j][translate_value][0] = weight_importance[i].index
+                                map_table[c_in + j][translate_value][1] = -1
+                        # 统计重用weight-pattern的个数
+                        translate_value = translate_value + 1
+                    else:
+                        # 记录保留weight-pattern的索引
+                        keep_number[keep_value] = weight_importance[i].index
+                        # 将该weight-pattern加入保留weight-pattern矩阵
+                        for j in range(0, 8):
+                            keep_weight_matrix[keep_value][j] = weight_matrix_pruning[weight_importance[i].index][c_in + j]
+                        # 统计保留weight-pattern的个数
+                        keep_value = keep_value + 1
+                # 统计该层重用weight-pattern数量
+                total_translate_weight_pattern = total_translate_weight_pattern + translate_value
+                # 给map_table设置结束标志
+                for j in range(0, 8):
+                    map_table[c_in + j][translate_value][0] = -1
+
+            # 计算该层weight-pattern重用率
+            weight_pattern_reuse_ratio = total_translate_weight_pattern / (in_channel / 8 * out_channel)
+            return map_table, weight_pattern_reuse_ratio
+
+
+def pattern_shape_and_value_similar_translate(model, in_channel, out_channel, weight_name, threshold, kernel_size, channel_number, mask):
     total_translate_weight_pattern = 0  # 统计重用weight-pattern的总数
 
     # 构造矩阵加速代码执行速度
@@ -818,7 +930,7 @@ def pattern_translate(model, model_name, translate_name, weight_name, in_channel
 
     if 'value' in translate_name:
         # 构造关系倍数矩阵
-        if 'normalized' in translate_name:
+        if 'similar' in translate_name:
             print('get multiple relationship matrix')
             for i in range(0, len(weight_name)):
                 print(weight_name[i])
@@ -874,7 +986,7 @@ def pattern_translate(model, model_name, translate_name, weight_name, in_channel
                         mask[name] = mask[name].to(device)
                         Z = mask[name] * par
                         loss_re_1 = loss_re_1 + weight_decay_1 * 0.5 * torch.sum(torch.pow(par - Z, 2))
-                    if 'value_normalized' in translate_name and name in reusing_layer_name:
+                    if 'value_similar' in translate_name and name in reusing_layer_name:
                         multiple_matrix[name] = multiple_matrix[name].to(device)
                         similar_weight_pattern[name] = similar_weight_pattern[name].to(device)
                         loss_re_2 = loss_re_2 + weight_decay_2 * torch.sum(torch.pow(multiple_matrix[name] * (par - similar_weight_pattern[name]), 2))
@@ -900,7 +1012,7 @@ def pattern_translate(model, model_name, translate_name, weight_name, in_channel
         # 构造相似weight-pattern矩阵
         print(time.strftime("%Y-%m-%d-%H_%M_%S", time.localtime()))
         if 'value' in translate_name:
-            if 'normalized' in translate_name:
+            if 'similar' in translate_name:
                 for i in range(0, len(weight_name)):
                     print(weight_name[i])
                     if 'fc' in weight_name[i]:
@@ -931,7 +1043,7 @@ def pattern_translate(model, model_name, translate_name, weight_name, in_channel
                         for c_out in range(0, out_channel[i]):
                             similar_weight_pattern[weight_name[i]][c_out] = similar_weight_pattern[weight_name[i]][c_out] * multiple_relationship_information[weight_name[i]][c_out] * scale
 
-            if 'original' in translate_name and (epoch + 1) in translate_epoch:
+            if 'identical' in translate_name and (epoch + 1) in translate_epoch:
                 for i in range(0, len(weight_name)):
                     print(weight_name[i])
                     if 'fc' in weight_name[i]:
