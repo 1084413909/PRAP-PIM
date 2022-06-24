@@ -1,8 +1,8 @@
 # PRAP-PIM
 
-Download cifar10 data
+Download cifar10 data.
 
-Run train() function, and it will train a original model.  
+Run train() function, and it will train an original model.  
 
 Predefine prune ratio and reuse ratio for each model. 
 
@@ -13,3 +13,5 @@ Run pattern_value_identical_translate(), pattern_value_similar_translate(), stru
 Run pattern_translate function, and it will fine-tune the weights.
 
 Use the prune ratio and actual reuse ratio fill the prune_config_list[] and reuse_config_list[], respectively, for each model in simulator/interface/network.py. 
+
+Run Model_latency.py and Model_energy.py.
