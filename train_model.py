@@ -5,7 +5,7 @@ import pandas as pd
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-from model import AlexNet, Vgg16, Res18, Res50, WRN
+from model import Vgg16, Res18, Res50, WRN
 from torchvision import transforms, datasets
 
 
@@ -122,25 +122,20 @@ if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     train_loader, test_loader, train_size, test_size, num_classes, input_size = get_dataloader('cifar10')  # 构建训练集、测试集
 
-    """
-    model_original = AlexNet(num_classes)
-    model_original = model_original.to(device)
-    weight_name = ['conv1.weight', 'conv2.weight', 'conv3.weight', 'conv4.weight', 'conv5.weight',
-                   'fc1.weight', 'fc2.weight', 'fc3.weight']
-
     model_original = Vgg16(num_classes)
     model_original = model_original.to(device)
     weight_name = ['conv1.weight', 'conv2.weight', 'conv3.weight', 'conv4.weight', 'conv5.weight', 'conv6.weight', 'conv7.weight', 
                    'conv8.weight', 'conv9.weight', 'conv10.weight', 'conv11.weight', 'conv12.weight', 'conv13.weight',
                    'fc1.weight', 'fc2.weight', 'fc3.weight']
 
+    """
     model_original = Res18(num_classes)
     model_original = model_original.to(device)
     weight_name = ['conv1.weight', 'conv2.weight', 'conv3.weight', 'conv4.weight', 'conv5.weight', 'conv6.weight',
                    'conv7.weight', 'conv8.weight', 'conv9.weight', 'conv10.weight', 'conv11.weight', 'conv12.weight',
                    'conv13.weight', 'conv14.weight', 'conv15.weight', 'conv16.weight', 'conv17.weight',
                    'shortcut1.weight', 'shortcut2.weight', 'shortcut3.weight']
-
+                   
     model_original = Res50(num_classes=10)
     model_original = model_original.to(device)
     weight_name = ['conv1.weight', 'conv2.weight', 'conv3.weight', 'conv4.weight', 'conv5.weight', 'conv6.weight', 'conv7.weight', 'conv8.weight',  'conv9.weight', 'conv10.weight',
@@ -149,21 +144,13 @@ if __name__ == '__main__':
                    'conv31.weight', 'conv32.weight', 'conv33.weight', 'conv34.weight', 'conv35.weight', 'conv36.weight', 'conv37.weight', 'conv38.weight', 'conv39.weight', 'conv40.weight',
                    'conv41.weight', 'conv42.weight', 'conv43.weight', 'conv44.weight', 'conv45.weight', 'conv46.weight', 'conv47.weight', 'conv48.weight', 'conv49.weight',
                    'shortcut1.weight', 'shortcut2.weight', 'shortcut3.weight', 'shortcut4.weight']
-
+                   
     model_original = WRN(num_classes)
     model_original = model_original.to(device)
     weight_name = ['conv1.weight', 'conv2.weight', 'conv3.weight', 'conv4.weight', 'conv5.weight', 'conv6.weight', 'conv7.weight',
                    'conv8.weight', 'conv9.weight', 'conv10.weight', 'conv11.weight', 'conv12.weight', 'conv13.weight',
                    'fc.weight', 'shortcut1.weight', 'shortcut2.weight', 'shortcut3.weight']
-
     """
-
-    model_original = Res18(num_classes)
-    model_original = model_original.to(device)
-    weight_name = ['conv1.weight', 'conv2.weight', 'conv3.weight', 'conv4.weight', 'conv5.weight', 'conv6.weight',
-                   'conv7.weight', 'conv8.weight', 'conv9.weight', 'conv10.weight', 'conv11.weight', 'conv12.weight',
-                   'conv13.weight', 'conv14.weight', 'conv15.weight', 'conv16.weight', 'conv17.weight',
-                   'shortcut1.weight', 'shortcut2.weight', 'shortcut3.weight']
 
     if device == 'cuda':
         cudnn.deterministic = True
@@ -171,4 +158,4 @@ if __name__ == '__main__':
     optimizer = optim.SGD(model_original.parameters(), lr=0.1, momentum=0.9, weight_decay=0)  # 创建优化器
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)  # 动态学习率
 
-    train(model_original, 'AlexNet', 0.001, device, optimizer, scheduler, train_loader, test_loader, 200, 150)  # 训练模型
+    train(model_original, 'Vgg16', 0.001, device, optimizer, scheduler, train_loader, test_loader, 200, 150)  # 训练模型
