@@ -982,7 +982,7 @@ def pattern_translate(model, model_name, translate_name, weight_name, in_channel
                 loss_ce = F.cross_entropy(outputs, targets)  # 交叉熵损失
                 loss_re_1 = loss_re_2 = 0  # 正则化损失，loss_re_1为剪枝正则化损失，loss_re_2为重用正则化损失
                 for name, par in model.named_parameters():
-                    if 'shape' in translate_name and name in weight_name:  # 对模型进行模式形状转换
+                    if ('shape' in translate_name or 'pruning' in translate_name) and name in weight_name:  # 对模型进行模式形状转换
                         mask[name] = mask[name].to(device)
                         Z = mask[name] * par
                         loss_re_1 = loss_re_1 + weight_decay_1 * 0.5 * torch.sum(torch.pow(par - Z, 2))
@@ -1073,7 +1073,6 @@ def pattern_translate(model, model_name, translate_name, weight_name, in_channel
                             similar_weight_pattern[weight_name[i]][c_out] = similar_weight_pattern[weight_name[i]][c_out] * scale
         print(time.strftime("%Y-%m-%d-%H_%M_%S", time.localtime()))
 
-        # 强制转换
         if epoch + 1 in translate_epoch:
             before_translate_accuracy[current_iteration], before_translate_loss[current_iteration] = test(model, device, test_loader)  # 测试转换前模型准确率
             print('Before_translate_accuracy: ' + str(before_translate_accuracy[current_iteration]) + ' Before_translate_loss: ' + str(before_translate_loss[current_iteration]))
@@ -1085,7 +1084,7 @@ def pattern_translate(model, model_name, translate_name, weight_name, in_channel
                         for c_out in range(0, out_channel[i]):
                             model.state_dict()[weight_name[i]][c_out] = similar_weight_pattern[weight_name[i]][c_out]
 
-            if 'shape' in translate_name:  # 对模型进行模式形状转换
+            if 'shape' in translate_name or 'pruning' in translate_name:  # 对模型进行模式形状转换
                 for i in range(0, len(weight_name)):
                     mask[weight_name[i]] = mask[weight_name[i]].to(device)
                     weight_pattern = model.state_dict()[weight_name[i]] * mask[weight_name[i]]
